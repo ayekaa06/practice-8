@@ -1,0 +1,140 @@
+package main
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestGetRate_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"base":"USD","target":"EUR","rate":0.92}`))
+	}))
+	defer server.Close()
+
+	svc := NewExchangeService(server.URL)
+	rate, err := svc.GetRate("USD", "EUR")
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if rate != 0.92 {
+		t.Errorf("expected rate 0.92, got %v", rate)
+	}
+}
+
+func TestGetRate_APIBusinessError_404(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":"invalid currency pair"}`))
+	}))
+	defer server.Close()
+
+	svc := NewExchangeService(server.URL)
+	_, err := svc.GetRate("USD", "XYZ")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid currency pair") {
+		t.Errorf("expected 'invalid currency pair' in error, got: %v", err)
+	}
+}
+
+func TestGetRate_APIBusinessError_400(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid currency pair"}`))
+	}))
+	defer server.Close()
+
+	svc := NewExchangeService(server.URL)
+	_, err := svc.GetRate("", "EUR")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "api error") {
+		t.Errorf("expected 'api error' in error, got: %v", err)
+	}
+}
+
+func TestGetRate_MalformedJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`Internal Server Error`))
+	}))
+	defer server.Close()
+
+	svc := NewExchangeService(server.URL)
+	_, err := svc.GetRate("USD", "EUR")
+	if err == nil {
+		t.Fatal("expected decode error, got nil")
+	}
+	if !strings.Contains(err.Error(), "decode error") {
+		t.Errorf("expected 'decode error', got: %v", err)
+	}
+}
+
+func TestGetRate_Timeout(t *testing.T) {
+
+	done := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-done:
+		case <-r.Context().Done():
+		}
+	}))
+
+	svc := NewExchangeService(server.URL)
+	svc.Client = &http.Client{Timeout: 50 * time.Millisecond}
+
+	_, err := svc.GetRate("USD", "EUR")
+
+	close(done)
+	server.Close()
+
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), "network error") {
+		t.Errorf("expected 'network error', got: %v", err)
+	}
+}
+
+func TestGetRate_ServerPanic500(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"internal server error"}`))
+	}))
+	defer server.Close()
+
+	svc := NewExchangeService(server.URL)
+	_, err := svc.GetRate("USD", "EUR")
+	if err == nil {
+		t.Fatal("expected error for 500, got nil")
+	}
+	if !strings.Contains(err.Error(), "api error") {
+		t.Errorf("expected 'api error', got: %v", err)
+	}
+}
+
+func TestGetRate_EmptyBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	svc := NewExchangeService(server.URL)
+	_, err := svc.GetRate("USD", "EUR")
+	if err == nil {
+		t.Fatal("expected error for empty body, got nil")
+	}
+	if !strings.Contains(err.Error(), "decode error") {
+		t.Errorf("expected 'decode error', got: %v", err)
+	}
+}
